@@ -1,0 +1,21 @@
+[package]
+name = "arm_viz"
+version = "0.1.0"
+authors = ["Ben Bonenfant <bonenfan5ben@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytemuck = "1.2"
+cgmath = "0.17"
+failure = "0.1"
+futures = "0.3.5"
+image = "0.23"
+lazy_static = "1.4.0"
+rand = "0.7"
+shaderc = "0.6"
+tobj = "2.0"
+winit = "0.22"
+wgpu = "0.5.0"
+
