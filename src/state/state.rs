@@ -1,5 +1,5 @@
 use futures::executor::block_on;
-use wgpu::BindGroupLayoutDescriptor;
+use wgpu::{BindGroupLayout, BindGroupLayoutDescriptor, Color, Device};
 use winit::{
     event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent},
     window::Window,
@@ -7,10 +7,10 @@ use winit::{
 
 use crate::{
     camera::{Camera, CameraController, Projection, View},
-    light::Light,
+    light::Lighting,
     model::{Instance, Model},
-    shaders::{ShaderData, LIGHT_SHADER_DATA, MODEL_SHADER_DATA},
-    texture,
+    shaders::{ShaderData, LIGHT_SHADER_DATA, MODEL_SHADER_DATA, SHADOW_SHADER_DATA},
+    texture::Texture,
     Uniforms,
 };
 use super::{Renderer, StateCore};
@@ -36,6 +36,28 @@ const TEXTURE_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDescriptor =
         label: Some("Texture Bind Group Layout"),
     };
 
+const SHADOW_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDescriptor = 
+    BindGroupLayoutDescriptor {
+        bindings: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStage::FRAGMENT,
+                ty: wgpu::BindingType::SampledTexture {
+                    multisampled: false,
+                    dimension: wgpu::TextureViewDimension::D2,
+                    component_type: wgpu::TextureComponentType::Float,
+                },
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStage::FRAGMENT,
+                ty: wgpu::BindingType::Sampler { comparison: false },
+            },
+        ],
+        label: Some("Shadow Bind Group Layout"),
+    };
+
+
 /// The State of the Application.
 pub struct State {
     
@@ -45,8 +67,7 @@ pub struct State {
     // The renderer object of the Models.
     model_renderer: Renderer,
 
-    // The renderer object for the Light.
-    light_renderer: Renderer,
+    lighting: Lighting,
 
     // The Camera object, i.e. the Viewer.
     camera: Camera,
@@ -54,14 +75,13 @@ pub struct State {
     // The controller of the Camer object. This processes events to affect the position of the Camera.
     camera_controller: CameraController,
 
-    // The Light object, i.e. the point that eminates light.
-    light: Light,
-
     // The Uniform (constant) objects that get sent to the GPU.
     uniforms: Uniforms,
 
-    // The texture object that tells the GPU the relative depth of objects in the scene.
-    depth_texture: texture::Texture,
+    // The texture object used to track the pixel depth of rendered objects (from the Camera's perspective).
+    depth_texture: Texture,
+
+    shadow_bind_group: wgpu::BindGroup,
 }
 
 impl State {
@@ -79,13 +99,6 @@ impl State {
         );
         let camera_controller = CameraController::new();
 
-        // Create the Light object. (This is point from which light shines, not the physical light box).
-        let light = Light::new_white(&core.device, (5.0, 10.0, 5.0).into());
-
-        // Texture Bind Group Layout.
-        let texture_bind_group_layout = 
-            core.device.create_bind_group_layout(&TEXTURE_BIND_GROUP_LAYOUT_DESC);
-        
         // Uniforms.
         let uniforms = Uniforms::new(
             &core.device, 
@@ -93,6 +106,52 @@ impl State {
             camera.build_view_projection_matrix(),
         );
 
+        // Create the Light object. (This is point from which light shines, not the physical light box).
+        use cgmath::Deg;
+        let mut lighting = Lighting::new(&core, &uniforms.bind_group_layout);
+        let cmd = lighting.add_spotlight(
+            &core.device,
+            String::from("Spotlight 1"),
+            Color::WHITE,
+            Projection::new(
+                core.get_aspect_ratio(), 
+                Deg(135.0),
+                Projection::DEFAULT_Z_NEAR,
+                Projection::DEFAULT_Z_FAR
+            ),
+            View::new(
+                (8.0, 12.0, 0.0).into(),
+                (0.0, 0.0, 0.0).into(),
+                (0.0, 1.0, 0.0).into()
+            ),
+        ).unwrap();
+        core.submit(&[cmd]);
+        let cmd = lighting.add_spotlight(
+            &core.device,
+            String::from("Spotlight 2"),
+            Color::WHITE,
+            Projection::new(
+                core.get_aspect_ratio(), 
+                Deg(135.0),
+                Projection::DEFAULT_Z_NEAR,
+                Projection::DEFAULT_Z_FAR
+            ),
+            View::new(
+                (-6.0, 15.0, 0.0).into(),
+                (0.0, 0.0, 0.0).into(),
+                (0.0, 1.0, 0.0).into()
+            ),
+        ).unwrap();
+        core.submit(&[cmd]);
+
+        // Texture Bind Group Layout.
+        let texture_bind_group_layout = 
+            core.device.create_bind_group_layout(&TEXTURE_BIND_GROUP_LAYOUT_DESC);
+        let shadow_bind_group_layout =
+            core.device.create_bind_group_layout(&SHADOW_BIND_GROUP_LAYOUT_DESC);
+        
+        
+        
         // Render Pipelines.
         let model_renderer = {
             // Create the model object and submit them to the GPU.
@@ -103,13 +162,17 @@ impl State {
             // Construct the instances of these objects (if they need to be replicated).
             let instances = create_tutorial_instances();
             obj_model.set_instances(instances, &core.device);
-            
+
+            let (floor_model, cmds) = create_floor(&core.device, &texture_bind_group_layout);
+            core.submit(&cmds);
+
             // These BindGroupLayouts define the structure of the data that will be sent to GPU
             //    and used during the shader programs.
             let bind_group_layouts = &[
                 &texture_bind_group_layout,
                 &uniforms.bind_group_layout,
-                &light.bind_group_layout,
+                &lighting.full_bind_group_layout,
+                &shadow_bind_group_layout,
             ];
 
             // Construct the render pipeline (the pipeline for sending data to the GPU and executing
@@ -118,65 +181,51 @@ impl State {
                 &core, bind_group_layouts, &MODEL_SHADER_DATA
             );
 
-            Renderer::new(vec![obj_model], render_pipeline)
-        };
-
-        let light_renderer = {
-            // Create the model object for the light box and submit it to the GPU.
-            let (mut light_model, cmds) = 
-                Model::load(&core.device, &texture_bind_group_layout, "src/res/light.obj").unwrap();
-            core.submit(&cmds);
-
-            // Move the instance of the light box to the position of the Light object.
-            let light_instance = Instance::from_position(light.get_position());
-            light_model.set_instances(vec![light_instance], &core.device);
-
-            // These BindGroupLayouts define the structure of the data that will be sent to GPU
-            //    and used during the shader programs.
-            // TODO: The texture bind group layout isn't necessary here.
-            //       The rendering logic needs to be updated to make this more efficient.
-            let bind_group_layouts = &[
-                &texture_bind_group_layout,
-                &uniforms.bind_group_layout,
-                &light.bind_group_layout,
-            ];
-
-            // Construct the render pipeline (the pipeline for sending data to the GPU and executing
-            //   the shader programs).
-            let render_pipeline = create_render_pipeline(
-                &core, bind_group_layouts, &LIGHT_SHADER_DATA
+            let shadow_pipeline = create_render_pipeline(
+                &core, &[&lighting.bind_group_layout], &SHADOW_SHADER_DATA
             );
-            let mut renderer = Renderer::new(vec![light_model], render_pipeline);
-            renderer.visible = false; // Make the light box invisible by default.
-            renderer
-            
+
+            Renderer::new(vec![obj_model, floor_model], render_pipeline, Some(shadow_pipeline))
         };
 
         // Depth Texture.
-        let depth_texture = texture::Texture::create_depth_texture(
-            &core.device, 
-            &core.swap_chain_desc, 
-            "depth_texture",
+        let depth_texture = 
+            Texture::create_depth_texture(&core.device, &core.swap_chain_desc, "Depth Texture");
+
+        let shadow_bind_group = core.device.create_bind_group(
+            &wgpu::BindGroupDescriptor {
+                layout: &shadow_bind_group_layout,
+                bindings: &[
+                    wgpu::Binding {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&lighting.shadow_texture.view)
+                    },
+                    wgpu::Binding {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&lighting.shadow_texture.sampler)
+                    },
+                ],
+                label: None,
+            }
         );
 
         return Self {
             core,
             model_renderer,
-            light_renderer,
             camera,
             camera_controller,
-            light,
+            lighting,
             uniforms,
             depth_texture,
+            shadow_bind_group,
         }
     }
 
     /// Handle a resizing of the window.
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.core.resize(new_size);
-        self.depth_texture = texture::Texture::create_depth_texture(
-            &self.core.device, &self.core.swap_chain_desc, "depth_texture"
-        );
+        self.depth_texture = 
+            Texture::create_depth_texture(&self.core.device, &self.core.swap_chain_desc, "Depth Texture");
     }
 
     /// Handle the Window events.
@@ -197,7 +246,14 @@ impl State {
             } => {
                 let is_pressed = *state == ElementState::Pressed;
                 match keycode {
-                    VirtualKeyCode::L => { self.light_renderer.visible ^= is_pressed },
+                    VirtualKeyCode::L => { 
+                        self.lighting
+                            .values_mut()
+                            .for_each(|light| {
+                                light.visible ^= is_pressed;
+                            }
+                        ); 
+                    },
                     _ => return handled_event,
                 }
             },
@@ -208,18 +264,20 @@ impl State {
 
     /// Make updates to the scene and data being sent to the GPU.
     pub fn update(&mut self) {
+        // use cgmath::{EuclideanSpace, Point3};
 
-        // Move the camera in a circular motion.
-        let new_position = {
-            use cgmath::{Deg, Quaternion};
-            use cgmath::Rotation3;
+        // // Move the camera in a circular motion.
+        // let new_position = {
+        //     use cgmath::{Deg, Quaternion};
+        //     use cgmath::Rotation3;
 
-            let old_position = self.light.get_position();
-            Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), Deg(1.0)) * old_position
-        };
-        self.light.set_position(new_position, &self.core);
-        let light_instance = Instance::from_position(self.light.get_position());
-        self.light_renderer.models[0].set_instances(vec![light_instance], &self.core.device);
+        //     let old_position = self.light.get_position();
+        //     Point3::from_vec(Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), Deg(1.0)) * old_position.to_vec())
+        // };
+
+        // self.light.set_position(new_position, &self.core);
+        // let light_instance = Instance::from_position(self.light.get_position().to_vec());
+        // self.light_renderer.models[0].set_instances(vec![light_instance], &self.core.device);
 
         // Make updates to the camera and uniform objects if necessary.
         if self.camera_controller.update_camera(&mut self.camera) {
@@ -229,12 +287,14 @@ impl State {
 
     /// Render the scene.
     pub fn render(&mut self) {
+
         let frame = 
             self.core.swap_chain.get_next_texture().expect("Timeout getting texture");
 
         let mut encoder = self.core.device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") }
         );
+        self.lighting.bake(&mut encoder, &self.model_renderer.models);
         
         let mut render_pass = encoder.begin_render_pass(
             &wgpu::RenderPassDescriptor {
@@ -260,12 +320,43 @@ impl State {
                 ),
             }
         );
-        self.model_renderer.render(&mut render_pass, &self.uniforms, &self.light);
-        self.light_renderer.render(&mut render_pass, &self.uniforms, &self.light);
+        self.model_renderer.render(&mut render_pass, &self.uniforms, &self.lighting, &self.shadow_bind_group);
+        self.lighting.render(&mut render_pass, &self.uniforms.bind_group);
         drop(render_pass);
     
         self.core.submit(&[encoder.finish()]);
     }
+}
+
+fn create_floor(device: &Device, layout: &BindGroupLayout) -> (Model, Vec<wgpu::CommandBuffer>) {
+    let (mut floor_model, cmds) = 
+        Model::load(device, layout, "src/res/tile.obj").unwrap();
+    
+    const NUM_TILES: usize = 20;
+    const SPACE_BETWEEN: f32 = 2.0;
+
+    let mut instances: Vec<Instance> = 
+        (0..NUM_TILES).flat_map(|z| {
+            (0..NUM_TILES).map(move |x| {
+                let x = SPACE_BETWEEN * (x as f32 - NUM_TILES as f32 / 2.0);
+                let z = SPACE_BETWEEN * (z as f32 - NUM_TILES as f32 / 2.0);
+                let position = cgmath::Vector3 { x, y: -5.0, z };
+                Instance::from_position(position)
+            })
+        }).collect();
+    
+    let flip = {
+        use cgmath::{Deg, Quaternion};
+        use cgmath::Rotation3;
+        Quaternion::from_angle_z(Deg(180.0))
+    };
+    let flipped_instances: Vec<Instance> = 
+        instances.iter().map(|instance| {
+            Instance { position: instance.position, rotation: flip }
+        }).collect();
+    instances.extend(flipped_instances);
+    floor_model.set_instances(instances, device);
+    return (floor_model, cmds)
 }
 
 /// Create a new RenderPipeline object.
@@ -275,10 +366,12 @@ fn create_render_pipeline(
     shader_data: &ShaderData
 ) -> wgpu::RenderPipeline {
 
-    let fragment_stage = wgpu::ProgrammableStageDescriptor { 
-        module: &core.device.create_shader_module(&shader_data.fragment),
-        entry_point: "main"
-    };
+    let module: wgpu::ShaderModule;
+    let fragment_stage = if let Some(ref data) = shader_data.fragment {
+        module = core.device.create_shader_module(&data);
+        Some(wgpu::ProgrammableStageDescriptor { module: &module, entry_point: "main" })
+    } else { None };
+
     let vertex_stage = wgpu::ProgrammableStageDescriptor { 
         module: &core.device.create_shader_module(&shader_data.vertex), 
         entry_point: "main"
@@ -291,13 +384,13 @@ fn create_render_pipeline(
         &wgpu::RenderPipelineDescriptor {
             layout: &render_pipeline_layout,
             vertex_stage: vertex_stage,
-            fragment_stage: Some(fragment_stage),
+            fragment_stage: fragment_stage,
             rasterization_state: Some(
                 wgpu::RasterizationStateDescriptor {
                     front_face: wgpu::FrontFace::Ccw,
                     cull_mode: wgpu::CullMode::Back,
-                    depth_bias: 0,
-                    depth_bias_slope_scale: 0.0,
+                    depth_bias: 2,
+                    depth_bias_slope_scale: 2.0,
                     depth_bias_clamp: 0.0,
                 }
             ),
@@ -312,7 +405,7 @@ fn create_render_pipeline(
             primitive_topology: wgpu::PrimitiveTopology::TriangleList,
             depth_stencil_state: Some(
                 wgpu::DepthStencilStateDescriptor {
-                    format: texture::Texture::DEPTH_FORMAT,
+                    format: Texture::DEPTH_FORMAT,
                     depth_write_enabled: true,
                     depth_compare: wgpu::CompareFunction::Less,
                     stencil_front: wgpu::StencilStateFaceDescriptor::IGNORE,

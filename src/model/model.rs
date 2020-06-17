@@ -122,6 +122,63 @@ impl Model {
         Ok((Model { meshes, materials, instances, instance_buffer }, command_buffers))
     }
 
+    pub fn new_light(device: &Device) -> Result<Self, failure::Error> {
+        // Parse the `.obj` file. Optional is enabled to triangulate mesh.
+        let (obj_models, obj_materials) = 
+            tobj::load_obj("src/res/light.obj", true)?;
+
+        // Iterate over the `tobj::Material` objects and convert them into 
+        //    `crate::model::Material` objects with corresponding `wgpu::CommandBuffer` objects.
+        let mut materials = Vec::new();
+
+        // Iterate over the `tobj::Model` objects and convert them into `crate::model::Mesh` objects.
+        let meshes: Vec<Mesh> = obj_models.into_iter()
+            .map(|model| {
+                let num_coords = model.mesh.positions.len() / 3;
+                let vertices: Vec<ModelVertex> = (0..num_coords)
+                    .map(|index| {
+                        ModelVertex {
+                            position: [
+                                model.mesh.positions[index * 3],
+                                model.mesh.positions[index * 3 + 1],
+                                model.mesh.positions[index * 3 + 2],
+                            ],
+                            tex_coords: [
+                                model.mesh.texcoords[index * 2],
+                                model.mesh.texcoords[index * 2 + 1]
+                            ],
+                            normal: [
+                                model.mesh.normals[index * 3],
+                                model.mesh.normals[index * 3 + 1],
+                                model.mesh.normals[index * 3 + 2],
+                            ],
+                        }
+                    }).collect();
+
+                let vertex_buffer = device.create_buffer_with_data(
+                    bytemuck::cast_slice(&vertices),
+                    BufferUsage::VERTEX
+                );
+                let index_buffer = device.create_buffer_with_data(
+                    bytemuck::cast_slice(&model.mesh.indices),
+                    BufferUsage::INDEX
+                );
+
+                Mesh {
+                    name: model.name,
+                    vertex_buffer,
+                    index_buffer,
+                    num_elements: model.mesh.indices.len() as u32,
+                    material: model.mesh.material_id.unwrap_or(0),
+                }
+            }).collect();
+        
+            let instances = vec![Instance::default()];
+            let instance_buffer = create_instance_buffer(&instances, device);
+
+        Ok(Model { meshes, materials, instances, instance_buffer })
+    }
+
     pub fn get_instance_buffer(&self) -> &wgpu::Buffer { &self.instance_buffer }
     pub fn set_instances(&mut self, instances: Vec<Instance>, device: &Device) {
         self.instances = instances;

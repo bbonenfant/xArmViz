@@ -1,18 +1,19 @@
-use cgmath::Vector3;
+use cgmath::{Point3, Vector3};
 use wgpu::Device;
 
-use crate::state::StateCore;
+use crate::{
+    camera::{Projection, View},
+    state::StateCore
+};
+use super::{LightSource, LightRaw};
 
 
 /// Structure for holding information about the light source 
 ///   that is sent to the Shader programs.
-pub struct Light {
+pub struct Spotlight {
 
     // The Bind Group used for rendering.
     pub bind_group: wgpu::BindGroup,
-
-    // The Layout used for the Uniforms BindGroup.
-    pub bind_group_layout: wgpu::BindGroupLayout,
     
     // The Buffer used to send data to the GPU.
     buffer: wgpu::Buffer,
@@ -20,13 +21,17 @@ pub struct Light {
     // The RGB value for the color of the light.
     color: cgmath::Vector3<f32>,
 
-    // The 3D Position of the light source.
-    position: cgmath::Vector3<f32>,
+    view: View,
+
+    projection: Projection,
+
+    view_projection: cgmath::Matrix4<f32>,
 }
 
-impl Light {
+impl Spotlight {
 
     const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+    const RED: [f32; 3] = [0.75, 0.0, 0.0];
 
     /// Creates a new Light object.
     ///
@@ -35,27 +40,17 @@ impl Light {
     /// * `device`   - The connection to the graphics device. Used to create the rendering resources.
     /// * `position` - The 3D position of the light source.
     /// * `color`    - The RGB value for the color of the light.
-    pub fn new(device: &Device, position: Vector3<f32>, color: Vector3<f32>) -> Self {
-        let light_raw = LightRaw::new(position, color);
-        let light_raw_size = std::mem::size_of_val(&light_raw) as wgpu::BufferAddress;
+    pub fn new(device: &Device, color: Vector3<f32>, projection: Projection, view: View, bind_group_layout: &wgpu::BindGroupLayout) -> Self {
+        let view_projection = projection.as_matrix() * view.as_matrix();
+
+        let light_raw = {
+            use cgmath::EuclideanSpace;
+            LightRaw::new(view.get_position().to_vec(), color, view_projection)
+        };
 
         let buffer = device.create_buffer_with_data(
             bytemuck::cast_slice(&[light_raw]),
-            wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
-        );
-
-        let bind_group_layout =
-            device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                    bindings: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
-                            ty: wgpu::BindingType::UniformBuffer { dynamic: false },
-                        },
-                    ],
-                    label: None,
-            }
+            wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST | wgpu::BufferUsage::COPY_SRC,
         );
 
         let bind_group = 
@@ -67,7 +62,7 @@ impl Light {
                         binding: 0,
                         resource: wgpu::BindingResource::Buffer {
                             buffer: &buffer,
-                            range: 0..light_raw_size,
+                            range: 0..LightRaw::SIZE,
                         },
                     },
                 ],
@@ -75,17 +70,7 @@ impl Light {
             }
         );
         
-        return Light{ position, color, bind_group, bind_group_layout, buffer }
-    }
-
-    /// Creates a new white Light object.
-    ///
-    /// # Arguments
-    ///
-    /// * `device`   - The connection to the graphics device. Used to create the rendering resources.
-    /// * `position` - The 3D position of the light source.
-    pub fn new_white(device: &Device, position: Vector3<f32>) -> Self {
-        return Self::new(device, position, Self::WHITE.into())
+        return Spotlight{ color, bind_group, buffer, view, projection, view_projection }
     }
 
     /// Get the color of the Light object.
@@ -103,7 +88,7 @@ impl Light {
     }
 
     /// Get the position of the Light object.
-    pub fn get_position(&self) -> Vector3<f32> { self.position }
+    pub fn get_position(&self) -> Point3<f32> { self.view.get_position() }
 
     /// Set the color of the Light object.
     ///
@@ -111,8 +96,9 @@ impl Light {
     ///
     /// * `position` - The new 3D position of the light source.
     /// * `core`     - Structure for holding the WGPU primitives for running a windowed application.
-    pub fn set_position(&mut self, position: Vector3<f32>, core: &StateCore) {
-        self.position = position;
+    pub fn set_position(&mut self, position: Point3<f32>, core: &StateCore) {
+        self.view.set_position(position);
+        self.view_projection = self.projection.as_matrix() * self.view.as_matrix();
         self.update_buffer(core)
     }
 
@@ -128,41 +114,28 @@ impl Light {
         );
 
         // Create a staging buffer with the updated Buffer data.
-        let light_raw = LightRaw::new(self.position, self.color);
+        let light_raw = {
+            use cgmath::EuclideanSpace;
+            LightRaw::new(self.view.get_position().to_vec(), self.color, self.view_projection)
+        };
         let staging_buffer = core.device.create_buffer_with_data(
             bytemuck::cast_slice(&[light_raw]), 
             wgpu::BufferUsage::COPY_SRC
         );
 
         // Copy the data from the staging buffer into the Light buffer.
-        let copy_size = std::mem::size_of_val(&light_raw) as wgpu::BufferAddress;
-        encoder.copy_buffer_to_buffer(&staging_buffer, 0, &self.buffer, 0, copy_size);
+        encoder.copy_buffer_to_buffer(&staging_buffer, 0, &self.buffer, 0, LightRaw::SIZE);
         core.submit(&[encoder.finish()]);
     }
 }
 
+impl LightSource for Spotlight {
 
-/// The Raw Light structure that is sent to the GPU.
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct LightRaw {
-
-    // The Vector representing the 3D position of the light source.
-    pub position: cgmath::Vector3<f32>,
-
-    // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field.
-    _padding: f32,
-
-    // The RGB value for the color of the light.
-    pub color: cgmath::Vector3<f32>,
-}
-
-unsafe impl bytemuck::Zeroable for LightRaw {}
-unsafe impl bytemuck::Pod for LightRaw {}
-
-impl LightRaw {
-    const PADDING: f32 = 0.0;
-    pub fn new(position: Vector3<f32>, color: Vector3<f32>) -> Self {
-        return LightRaw{ position, _padding: Self::PADDING, color }
+    fn as_light_raw(&self) -> LightRaw {
+        use cgmath::EuclideanSpace;
+        LightRaw::new(self.view.get_position().to_vec(), self.color, self.view_projection)
     }
+
+    fn get_buffer(&self) -> &wgpu::Buffer { &self.buffer }
+    fn get_bind_group(&self) -> &wgpu::BindGroup { &self.bind_group }
 }

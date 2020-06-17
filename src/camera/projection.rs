@@ -20,11 +20,12 @@ pub struct Projection {
     projection: Matrix4<f32>,
 }
 
-pub const DEFAULT_FOV_Y: cgmath::Deg<f32> = Deg(45.0);
-pub const DEFAULT_Z_NEAR: f32 = 0.1;
-pub const DEFAULT_Z_FAR: f32 = 100.0;
 
 impl Projection {
+
+    pub const DEFAULT_FOV_Y: cgmath::Deg<f32> = Deg(45.0);
+    pub const DEFAULT_Z_NEAR: f32 = 0.1;
+    pub const DEFAULT_Z_FAR: f32 = 100.0;
 
     /// Create a new Projection object. Constructs the Projection matrix at creation.
     pub fn new(aspect: f32, fov_y: Deg<f32>, z_near: f32, z_far: f32) -> Self {
@@ -35,9 +36,9 @@ impl Projection {
     pub fn with_aspect(aspect: f32) -> Self {
         return Projection::new(
             aspect, 
-            DEFAULT_FOV_Y,
-            DEFAULT_Z_NEAR,
-            DEFAULT_Z_FAR
+            Self::DEFAULT_FOV_Y,
+            Self::DEFAULT_Z_NEAR,
+            Self::DEFAULT_Z_FAR
         )
     }
 

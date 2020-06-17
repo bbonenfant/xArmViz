@@ -2,6 +2,22 @@ use cgmath::{Matrix4, Vector4};
 use wgpu::{BufferAddress, BindGroupLayoutDescriptor, Device};
 use crate::{camera::Camera, state::StateCore};
 
+pub const BIND_GROUP_LAYOUT_DESC: wgpu::BindGroupLayoutDescriptor<'static> = {
+    const VISIBILITY: wgpu::ShaderStage = wgpu::ShaderStage::from_bits_truncate(
+        wgpu::ShaderStage::VERTEX.bits() | wgpu::ShaderStage::FRAGMENT.bits()
+    );
+    BindGroupLayoutDescriptor {
+        bindings: &[ 
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: VISIBILITY,
+                ty: wgpu::BindingType::UniformBuffer { dynamic: false },
+            },
+         ],
+        label: Some("Uniform Bind Group Layout"),
+    }
+};
+
 /// Structure for holding the Uniform objects that are sent to the Shader programs.
 pub struct Uniforms {
 
@@ -35,18 +51,7 @@ impl Uniforms {
         // Create the BindGroup object for the Uniforms.
         let mem_size = std::mem::size_of_val(&uniforms_raw) as BufferAddress;
         let bind_group_layout = 
-            device.create_bind_group_layout(
-                &BindGroupLayoutDescriptor {
-                    bindings: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
-                            ty: wgpu::BindingType::UniformBuffer { dynamic: false },
-                        },
-                    ],
-                    label: Some("Uniform Bind Group Layout"),
-                }
-            );
+            device.create_bind_group_layout(&BIND_GROUP_LAYOUT_DESC);
         let bind_group = 
             device.create_bind_group(
                 &wgpu::BindGroupDescriptor {

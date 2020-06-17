@@ -6,6 +6,7 @@ use cgmath::{
     Rotation3,
     Vector3
 };
+use super::Projection;
 
 /// Representation of the View.
 ///   An encoding of the position and orientation of the viewer.
@@ -18,7 +19,7 @@ pub struct View {
     // The target that the viewer is looking at.
     target: Point3<f32>,
 
-    // The Vector pointing up. (The )
+    // The Vector pointing up (with respect to the viewer).
     up: Vector3<f32>,
 
     // The View Matrix. This is cached.
@@ -29,16 +30,18 @@ impl View {
 
     /// Construct a new View. Checks orthogonality of Up Vector.
     pub fn new(eye: Point3<f32>, target: Point3<f32>, up: Vector3<f32>) -> Self {
-        // Assert that the Up vector is orthogonal to the Forward vector.
         use cgmath::InnerSpace;
-        debug_assert!((target - eye).dot(up).abs() < 1e-5);
-
         let up = up.normalize();
         let view = Matrix4::look_at(eye, target, up);
         return View { eye, target, up, view }
     }
 
     pub fn get_position(&self) -> Point3<f32> { self.eye }
+
+    pub fn set_position(&mut self, position: Point3<f32>) {
+        self.eye = position;
+        self.view = Matrix4::look_at(self.eye, self.target, self.up);
+    }
     
     /// Getter for the View Matrix.
     pub fn as_matrix(&self) -> Matrix4<f32> { self.view }
@@ -65,10 +68,9 @@ impl View {
         // Apply Transformations.
         let eye_vec = self.eye.to_vec();
         let magnitude = {
-            use super::projection::DEFAULT_Z_NEAR as z_near;
             match eye_vec.magnitude() - radial {
-                x if x > z_near => x,
-                _ => z_near
+                x if x > Projection::DEFAULT_Z_NEAR => x,
+                _ => Projection::DEFAULT_Z_NEAR
             }
         };
         let eye = Point3::<f32>::from_vec(
@@ -78,12 +80,17 @@ impl View {
                 )
             ).normalize_to(magnitude)
         );
-        let up = 
-            yaw_rot.rotate_vector(
-                pitch_rot.rotate_vector(
-                    roll_rot.rotate_vector(self.up)
-                )
-            ).normalize();
+        let up = {
+            let up = 
+                yaw_rot.rotate_vector(
+                    pitch_rot.rotate_vector(
+                        roll_rot.rotate_vector(self.up)
+                    )
+                ).normalize();
+            // Use Gram-Schmidt method to correct error in orthogonality. 
+            let correction = (forward.dot(up) / forward.dot(forward)) * forward;
+            up - correction
+        };
 
         // Construct new View.
         return View::new(eye, self.target, up)
